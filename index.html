@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Owlbear Labyrinth</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@2/lib/index.umd.js"></script>
+    
+    <style>
+        body {
+            background-color: #1e293b;
+            color: #f8fafc;
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 0;
+        }
+
+        .layout-container {
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+            padding: 1rem;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        @media (min-width: 768px) {
+            .layout-container {
+                flex-direction: row;
+                align-items: flex-start;
+                padding: 2rem;
+            }
+        }
+
+        /* 9x9 Grid (7x7 Board + 2 rows/cols for arrows) */
+        .game-grid {
+            display: grid;
+            grid-template-columns: 40px repeat(7, 1fr) 40px;
+            grid-template-rows: 40px repeat(7, 1fr) 40px;
+            gap: 4px;
+            background-color: #0f172a;
+            padding: 8px;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+            width: 100%;
+            max-width: 600px;
+        }
+
+        .tile {
+            aspect-ratio: 1 / 1;
+            background-color: #166534; /* Hedge green */
+            border-radius: 8px;
+            position: relative;
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.3);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            transition: transform 0.2s ease-in-out;
+        }
+
+        .tile svg {
+            width: 100%;
+            height: 100%;
+            transition: transform 0.3s ease-in-out;
+        }
+
+        .arrow-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+            transition: all 0.2s;
+            color: #facc15; /* Yellow 400 */
+        }
+
+        .arrow-btn:hover:not(.disabled) {
+            background: rgba(255, 255, 255, 0.2);
+            transform: scale(1.1);
+        }
+
+        .arrow-btn.disabled {
+            opacity: 0.1;
+            cursor: not-allowed;
+            color: #ef4444; /* Red for disabled reversal */
+        }
+
+        .extra-tile-container {
+            background: #0f172a;
+            padding: 1.5rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1rem;
+            min-width: 200px;
+        }
+
+        .extra-tile-wrapper {
+            width: 120px;
+            height: 120px;
+            cursor: pointer;
+            border-radius: 8px;
+            transition: all 0.2s;
+        }
+
+        .extra-tile-wrapper:hover {
+            box-shadow: 0 0 0 4px #facc15;
+            transform: scale(1.05);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="layout-container">
+        
+        <!-- Sidebar Controls -->
+        <div class="extra-tile-container">
+            <h2 class="text-xl font-bold text-slate-200 text-center mb-2">Extra Tile</h2>
+            <div id="extra-tile-render" class="extra-tile-wrapper tile" onclick="rotateExtraTile()">
+                <!-- Rendered dynamically -->
+            </div>
+            <p class="text-sm text-slate-400 text-center mt-2">Click tile to rotate</p>
+            
+            <div class="w-full h-px bg-slate-700 my-4"></div>
+            
+            <button onclick="resetBoard()" class="w-full bg-red-900/50 hover:bg-red-800 text-red-200 py-2 px-4 rounded-md transition font-medium">
+                Reset Board
+            </button>
+            <div id="sync-status" class="mt-4 text-xs font-semibold text-emerald-400 text-center">
+                Checking connection...
+            </div>
+        </div>
+
+        <!-- Main Board -->
+        <div class="flex-grow flex justify-center">
+            <div id="game-grid" class="game-grid">
+                <!-- Rendered dynamically -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const METADATA_KEY = 'com.owlbear.labyrinth/state';
+        let appState = null;
+        let isObrConnected = false;
+
+        // Tile Paths Drawing logic
+        // We overlap paths to create stone walkways with dark borders
+        const SVG_DEFS = {
+            'I': `
+                <path d="M 30,0 L 30,60" stroke="#475569" stroke-width="22" fill="none" />
+                <path d="M 30,0 L 30,60" stroke="#cbd5e1" stroke-width="16" fill="none" />
+            `,
+            'L': `
+                <path d="M 30,0 L 30,30 L 60,30" stroke="#475569" stroke-width="22" fill="none" stroke-linejoin="miter" />
+                <path d="M 30,0 L 30,30 L 60,30" stroke="#cbd5e1" stroke-width="16" fill="none" stroke-linejoin="miter" />
+            `,
+            'T': `
+                <path d="M 0,30 L 60,30 M 30,0 L 30,30" stroke="#475569" stroke-width="22" fill="none" stroke-linejoin="miter" />
+                <path d="M 0,30 L 60,30 M 30,0 L 30,30" stroke="#cbd5e1" stroke-width="16" fill="none" stroke-linejoin="miter" />
+            `
+        };
+
+        function getTileSVG(type, rot) {
+            return `
+                <svg viewBox="0 0 60 60" style="transform: rotate(${rot}deg)">
+                    ${SVG_DEFS[type]}
+                </svg>
+            `;
+        }
+
+        // SVG Icons for Arrows
+        const ARROW_ICONS = {
+            UP: `<svg viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8"><path d="M12 4l-8 8h16z"/></svg>`,
+            DOWN: `<svg viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8"><path d="M12 20l8-8H4z"/></svg>`,
+            LEFT: `<svg viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8"><path d="M4 12l8-8v16z"/></svg>`,
+            RIGHT: `<svg viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8"><path d="M20 12l-8 8V4z"/></svg>`
+        };
+
+        function generateInitialState() {
+            // Standard fixed layout mapping (row,col)
+            const fixed = {
+                '0,0': { type: 'L', rot: 90 }, '0,2': { type: 'T', rot: 180 }, '0,4': { type: 'T', rot: 180 }, '0,6': { type: 'L', rot: 180 },
+                '2,0': { type: 'T', rot: 90 }, '2,2': { type: 'T', rot: 90 }, '2,4': { type: 'T', rot: 180 }, '2,6': { type: 'T', rot: 270 },
+                '4,0': { type: 'T', rot: 90 }, '4,2': { type: 'T', rot: 0 }, '4,4': { type: 'T', rot: 270 }, '4,6': { type: 'T', rot: 270 },
+                '6,0': { type: 'L', rot: 0 }, '6,2': { type: 'T', rot: 0 }, '6,4': { type: 'T', rot: 0 }, '6,6': { type: 'L', rot: 270 }
+            };
+
+            let deck = [];
+            for(let i=0; i<16; i++) deck.push({ type: 'L' });
+            for(let i=0; i<12; i++) deck.push({ type: 'I' });
+            for(let i=0; i<6; i++) deck.push({ type: 'T' });
+
+            // Shuffle
+            for (let i = deck.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [deck[i], deck[j]] = [deck[j], deck[i]];
+            }
+
+            let board = Array(7).fill(null).map(() => Array(7).fill(null));
+
+            for(let r=0; r<7; r++) {
+                for(let c=0; c<7; c++) {
+                    if (fixed[`${r},${c}`]) {
+                        board[r][c] = { ...fixed[`${r},${c}`], id: `fixed_${r}_${c}` };
+                    } else {
+                        let tile = deck.pop();
+                        tile.rot = [0, 90, 180, 270][Math.floor(Math.random() * 4)];
+                        tile.id = `mov_${r}_${c}`;
+                        board[r][c] = tile;
+                    }
+                }
+            }
+
+            let extraTile = deck.pop();
+            extraTile.rot = [0, 90, 180, 270][Math.floor(Math.random() * 4)];
+            extraTile.id = 'extra_1';
+
+            return { board, extraTile, lastShift: null };
+        }
+
+        function applyShift(state, type, index, dir) {
+            let newBoard = JSON.parse(JSON.stringify(state.board));
+            let newExtra = null;
+            let currentExtra = JSON.parse(JSON.stringify(state.extraTile));
+
+            if (type === 'row') {
+                if (dir === 1) { // Left to Right
+                    newExtra = newBoard[index][6];
+                    for(let c=6; c>0; c--) newBoard[index][c] = newBoard[index][c-1];
+                    newBoard[index][0] = currentExtra;
+                } else { // Right to Left
+                    newExtra = newBoard[index][0];
+                    for(let c=0; c<6; c++) newBoard[index][c] = newBoard[index][c+1];
+                    newBoard[index][6] = currentExtra;
+                }
+            } else if (type === 'col') {
+                if (dir === 1) { // Top to Bottom
+                    newExtra = newBoard[6][index];
+                    for(let r=6; r>0; r--) newBoard[r][index] = newBoard[r-1][index];
+                    newBoard[0][index] = currentExtra;
+                } else { // Bottom to Top
+                    newExtra = newBoard[0][index];
+                    for(let r=0; r<6; r++) newBoard[r][index] = newBoard[r+1][index];
+                    newBoard[6][index] = currentExtra;
+                }
+            }
+
+            return {
+                board: newBoard,
+                extraTile: newExtra,
+                lastShift: { type, index, dir }
+            };
+        }
+
+        function isReversing(type, index, dir, lastShift) {
+            if (!lastShift) return false;
+            return lastShift.type === type && lastShift.index === index && lastShift.dir === -dir;
+        }
+
+        async function handleShift(type, index, dir) {
+            if (!appState) return;
+            if (isReversing(type, index, dir, appState.lastShift)) return; // Prevent reversing last move
+            
+            const newState = applyShift(appState, type, index, dir);
+            await syncState(newState);
+        }
+
+        async function rotateExtraTile() {
+            if (!appState) return;
+            const newState = JSON.parse(JSON.stringify(appState));
+            newState.extraTile.rot = (newState.extraTile.rot + 90) % 360;
+            await syncState(newState);
+        }
+
+        async function resetBoard() {
+            const newState = generateInitialState();
+            await syncState(newState);
+        }
+
+        async function syncState(newState) {
+            appState = newState;
+            renderApp(appState);
+            if (isObrConnected) {
+                try {
+                    await OBR.room.setMetadata({ [METADATA_KEY]: newState });
+                } catch(e) {
+                    console.error("Failed to sync with OBR", e);
+                }
+            }
+        }
+
+        function renderApp(state) {
+            if (!state) return;
+            
+            // Render Extra Tile
+            const extraDiv = document.getElementById('extra-tile-render');
+            extraDiv.innerHTML = getTileSVG(state.extraTile.type, state.extraTile.rot);
+
+            // Render Grid
+            const grid = document.getElementById('game-grid');
+            grid.innerHTML = '';
+
+            // 9x9 CSS Grid setup
+            for(let r = 0; r < 9; r++) {
+                for(let c = 0; c < 9; c++) {
+                    const cell = document.createElement('div');
+
+                    let isBoard = (r >= 1 && r <= 7) && (c >= 1 && c <= 7);
+                    let isTopArrow = (r === 0) && (c === 2 || c === 4 || c === 6);
+                    let isBottomArrow = (r === 8) && (c === 2 || c === 4 || c === 6);
+                    let isLeftArrow = (c === 0) && (r === 2 || r === 4 || r === 6);
+                    let isRightArrow = (c === 8) && (r === 2 || r === 4 || r === 6);
+
+                    if (isBoard) {
+                        let br = r - 1;
+                        let bc = c - 1;
+                        let tile = state.board[br][bc];
+                        cell.className = 'tile';
+                        cell.innerHTML = getTileSVG(tile.type, tile.rot);
+                    } else if (isTopArrow) {
+                        cell.className = 'arrow-btn';
+                        cell.innerHTML = ARROW_ICONS.DOWN;
+                        if (isReversing('col', c-1, 1, state.lastShift)) cell.classList.add('disabled');
+                        else cell.onclick = () => handleShift('col', c-1, 1);
+                    } else if (isBottomArrow) {
+                        cell.className = 'arrow-btn';
+                        cell.innerHTML = ARROW_ICONS.UP;
+                        if (isReversing('col', c-1, -1, state.lastShift)) cell.classList.add('disabled');
+                        else cell.onclick = () => handleShift('col', c-1, -1);
+                    } else if (isLeftArrow) {
+                        cell.className = 'arrow-btn';
+                        cell.innerHTML = ARROW_ICONS.RIGHT;
+                        if (isReversing('row', r-1, 1, state.lastShift)) cell.classList.add('disabled');
+                        else cell.onclick = () => handleShift('row', r-1, 1);
+                    } else if (isRightArrow) {
+                        cell.className = 'arrow-btn';
+                        cell.innerHTML = ARROW_ICONS.LEFT;
+                        if (isReversing('row', r-1, -1, state.lastShift)) cell.classList.add('disabled');
+                        else cell.onclick = () => handleShift('row', r-1, -1);
+                    } else {
+                        // Empty corner or un-clickable edge
+                        cell.className = '';
+                    }
+
+                    grid.appendChild(cell);
+                }
+            }
+        }
+
+        async function initializeApp() {
+            // Check if OBR SDK is available (meaning we are running inside Owlbear Rodeo)
+            if (typeof OBR !== 'undefined' && OBR.isAvailable) {
+                try {
+                    await OBR.onReady(async () => {
+                        isObrConnected = true;
+                        document.getElementById('sync-status').innerText = "Live Sync: Active";
+                        document.getElementById('sync-status').className = "mt-4 text-xs font-semibold text-emerald-400 text-center";
+                        
+                        // Subscribe to metadata changes
+                        OBR.room.onMetadataChange((metadata) => {
+                            if (metadata[METADATA_KEY]) {
+                                appState = metadata[METADATA_KEY];
+                                renderApp(appState);
+                            }
+                        });
+
+                        // Check initial metadata
+                        const metadata = await OBR.room.getMetadata();
+                        if (metadata[METADATA_KEY]) {
+                            appState = metadata[METADATA_KEY];
+                        } else {
+                            // If no state exists in the room, generate one and set it
+                            appState = generateInitialState();
+                            await OBR.room.setMetadata({ [METADATA_KEY]: appState });
+                        }
+                        renderApp(appState);
+                    });
+                } catch(e) {
+                    console.error("OBR Init Failed, falling back to local mode:", e);
+                    startLocalMode();
+                }
+            } else {
+                startLocalMode();
+            }
+        }
+
+        function startLocalMode() {
+            isObrConnected = false;
+            document.getElementById('sync-status').innerText = "Local Sandbox Mode";
+            document.getElementById('sync-status').className = "mt-4 text-xs font-semibold text-yellow-500 text-center";
+            appState = generateInitialState();
+            renderApp(appState);
+        }
+
+        // Kickoff
+        window.addEventListener('load', initializeApp);
+
+    </script>
+</body>
+</html>
